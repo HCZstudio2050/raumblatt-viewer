@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Raumblatt 3D Viewer – Multiroom</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    #overlay {
+      position: absolute; z-index: 10; left: 0; top: 0;
+      background: rgba(255,255,255,0.95); padding: 10px;
+      border-bottom: 1px solid #ccc;
+      display: flex; gap: 10px; align-items: center;
+    }
+    #elementInfo {
+      position: absolute; z-index: 20; right: 30px; top: 60px;
+      background: rgba(255,255,255,0.98); border:1px solid #ccc;
+      padding: 14px 20px; min-width: 260px; display:none;
+      box-shadow: 2px 2px 10px #bbb; font-size: 1rem; border-radius: 7px;
+    }
+    #canvas3d { display: block; width: 100vw; height: 100vh; }
+    select, button {
+      font-size: 1rem;
+      padding: 6px 10px;
+    }
+    .layer-table {
+      margin-top: 6px;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+    }
+    .layer-table td, .layer-table th {
+      border: 1px solid #ccc;
+      padding: 4px 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <label for="fileInput">📂 JSON laden:</label>
+    <input type="file" id="fileInput" accept=".json" multiple>
+    <label for="roomSelect">🏠 Raum wählen:</label>
+    <select id="roomSelect"></select>
+    <span id="roomMeta"></span>
+  </div>
+
+  <div id="elementInfo"></div>
+
+  <script type="module">
+    import * as THREE from 'https://esm.sh/three@0.153.0';
+    import { OrbitControls } from 'https://esm.sh/three@0.153.0/examples/jsm/controls/OrbitControls.js';
+
+    let scene, camera, renderer, controls;
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let elementMeshes = [];
+    let loadedRooms = [];
+	let selectedWireframe = null;
+
+    const colorMap = {
+      "Wände": 0x8d8d8d,
+      "Geschossdecken": 0xccc68b,
+      "Decken": 0xcfe2f3,
+      "Türen": 0xa55d1e,
+      "Fenster": 0x42a7f5,
+      "Möbel": 0x6a994e
+    };
+
+    function getColor(cat) {
+      return colorMap[cat] || 0x999999;
+    }
+
+    function fitCameraToScene() {
+	  const box = new THREE.Box3();
+
+	  scene.traverse(function (object) {
+		if (object.isMesh) {
+		  const objBox = new THREE.Box3().setFromObject(object);
+		  box.union(objBox);
+		}
+	  });
+
+	  const size = new THREE.Vector3();
+	  const center = new THREE.Vector3();
+	  box.getSize(size);
+	  box.getCenter(center);
+
+	  const maxDim = Math.max(size.x, size.y, size.z);
+	  const fov = camera.fov * (Math.PI / 180);
+	  const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+
+	  camera.position.set(center.x, center.y - size.y, center.z + cameraZ);
+	  camera.up.set(0, 0, 1);
+	  camera.lookAt(center);
+	  controls.target.copy(center);
+	  controls.update();
+	}
+
+
+    function clearScene() {
+      while(scene.children.length > 0){
+        scene.remove(scene.children[0]);
+      }
+    }
+
+    function drawRoomData(roomData) {
+      clearScene();
+      elementMeshes = [];
+
+      const room = roomData.room;
+      const bmin = room.bbox[0], bmax = room.bbox[1];
+      const w = bmax[0]-bmin[0], d = bmax[1]-bmin[1], h = bmax[2]-bmin[2];
+
+      const roomBox = new THREE.BoxGeometry(w, d, h);
+      const roomMat = new THREE.MeshBasicMaterial({ color: 0xffcc00, wireframe: true });
+      const roomMesh = new THREE.Mesh(roomBox, roomMat);
+      roomMesh.position.set(bmin[0]+w/2, bmin[1]+d/2, bmin[2]+h/2);
+      scene.add(roomMesh);
+
+      roomData.elements.forEach(el => {
+        const [min, max] = el.bbox;
+        const w = max[0]-min[0], d = max[1]-min[1], h = max[2]-min[2];
+        const geom = new THREE.BoxGeometry(w, d, h);
+        const mat = new THREE.MeshBasicMaterial({
+          color: getColor(el.category),
+          opacity: 0.5,
+          transparent: true
+        });
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(min[0]+w/2, min[1]+d/2, min[2]+h/2);
+        mesh.userData.element = el;
+        scene.add(mesh);
+        elementMeshes.push(mesh);
+      });
+
+      fitCameraToScene();
+
+      document.getElementById('roomMeta').textContent = `📌 ${room.name} (${room.number})`;
+    }
+
+    function showElementInfo(el) {
+	  const div = document.getElementById('elementInfo');
+	  let html = `<b>Kategorie:</b> ${el.category}<br>
+				  <b>Typ:</b> ${el.type}<br>
+				  <b>ID:</b> ${el.id}<br>`;
+	  if (el.area !== null) html += `<b>Fläche:</b> ${el.area} m²<br>`;
+	  if (el.volume !== null) html += `<b>Volumen:</b> ${el.volume} m³<br>`;
+
+	  if (el.custom) {
+		html += `<b>Parameter:</b><br>`;
+		for (const [key, val] of Object.entries(el.custom)) {
+		  html += `${key}: ${val}<br>`;
+		}
+	  }
+
+	  if (el.layers && el.layers.length) {
+		html += `<b>Aufbau:</b><br><table class="layer-table">
+				  <tr><th>Funktion</th><th>Material</th><th>Dicke (mm)</th></tr>`;
+		el.layers.forEach(layer => {
+		  html += `<tr><td>${layer.function}</td><td>${layer.material}</td><td>${layer.thickness_mm}</td></tr>`;
+		});
+		html += `</table>`;
+	  }
+
+	  div.innerHTML = html;
+	  div.style.display = 'block';
+	}
+
+    function hideElementInfo() {
+      document.getElementById('elementInfo').style.display = 'none';
+    }
+
+	function loadRoomFiles(files) {
+	  loadedRooms = [];
+	  const select = document.getElementById('roomSelect');
+	  select.innerHTML = "";
+
+	  const promises = Array.from(files).map(file => {
+		return new Promise((resolve, reject) => {
+		  const reader = new FileReader();
+		  reader.onload = e => {
+			try {
+			  const json = JSON.parse(e.target.result);
+			  let roomsToAdd = [];
+
+			  if (json.rooms && Array.isArray(json.rooms)) {
+				roomsToAdd = json.rooms;
+			  } else if (json.room && json.elements) {
+				roomsToAdd = [json];
+			  } else {
+				console.warn("❌ Ungültiges JSON-Format in Datei:", file.name);
+				return resolve(); // Skip but don't reject entire Promise.all
+			  }
+
+			  roomsToAdd.forEach(roomJson => {
+				loadedRooms.push(roomJson);
+				const label = `${roomJson.room.number} – ${roomJson.room.name}`;
+				const opt = document.createElement('option');
+				opt.value = loadedRooms.length - 1;
+				opt.textContent = label;
+				select.appendChild(opt);
+			  });
+
+			  resolve();
+			} catch (err) {
+			  console.error("❌ Fehler beim Parsen der Datei:", file.name, err);
+			  resolve(); // Don't block others
+			}
+		  };
+		  reader.readAsText(file);
+		});
+	  });
+
+	  Promise.all(promises).then(() => {
+		if (loadedRooms.length) {
+		  select.value = "0";
+		  drawRoomData(loadedRooms[0]);
+		  hideElementInfo();
+		}
+	  });
+	}
+
+
+    function init3D() {
+      scene = new THREE.Scene();
+      const aspect = window.innerWidth / window.innerHeight;
+      camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 10000);
+	  camera.up.set(0, 0, 1);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setClearColor(0xf7f7f7);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.domElement.id = "canvas3d";
+      document.body.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+	  controls.enableDamping = true;
+	  controls.dampingFactor = 0.1;
+	  controls.rotateSpeed = 0.8;
+	  controls.screenSpacePanning = false;
+
+	  controls.update();
+
+	   // Z-up world
+
+      const light = new THREE.DirectionalLight(0xffffff, 0.8);
+      light.position.set(0, -1, 2).normalize();
+      scene.add(light);
+
+      animate();
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls?.update();
+      renderer.render(scene, camera);
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      init3D();
+	  // Reset file input display
+      document.getElementById('fileInput').value = null;
+      document.getElementById('fileInput').addEventListener('change', e => {
+        loadRoomFiles(e.target.files);
+      });
+
+      document.getElementById('roomSelect').addEventListener('change', e => {
+        const idx = parseInt(e.target.value);
+        drawRoomData(loadedRooms[idx]);
+        hideElementInfo();
+      });
+
+      window.addEventListener('resize', () => {
+        const w = window.innerWidth, h = window.innerHeight;
+        camera.aspect = w/h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      });
+
+      document.addEventListener('pointerdown', e => {
+        if (!elementMeshes.length) return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObjects(elementMeshes);
+        if (hits.length) {
+		  const mesh = hits[0].object;
+
+		  // Remove previous wireframe
+		  if (selectedWireframe) {
+			scene.remove(selectedWireframe);
+			selectedWireframe.geometry.dispose();
+			selectedWireframe.material.dispose();
+			selectedWireframe = null;
+		  }
+
+		  // Create wireframe overlay
+		  const wireframe = new THREE.LineSegments(
+			new THREE.EdgesGeometry(mesh.geometry),
+			new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 })
+		  );
+		  wireframe.position.copy(mesh.position);
+		  wireframe.rotation.copy(mesh.rotation);
+		  wireframe.scale.copy(mesh.scale);
+		  scene.add(wireframe);
+		  selectedWireframe = wireframe;
+
+		  showElementInfo(mesh.userData.element);
+		} else {
+		  // Clear selection
+		  if (selectedWireframe) {
+			scene.remove(selectedWireframe);
+			selectedWireframe.geometry.dispose();
+			selectedWireframe.material.dispose();
+			selectedWireframe = null;
+		  }
+		  hideElementInfo();
+		}
+      });
+    });
+  </script>
+</body>
+</html>
