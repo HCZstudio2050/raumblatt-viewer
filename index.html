@@ -116,6 +116,7 @@
       scene.add(roomMesh);
 
       roomData.elements.forEach(el => {
+	if (!el.bbox) return; // Skip elements with no geometry
         const [min, max] = el.bbox;
         const w = max[0]-min[0], d = max[1]-min[1], h = max[2]-min[2];
         const geom = new THREE.BoxGeometry(w, d, h);
